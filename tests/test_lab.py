@@ -192,3 +192,65 @@ def test_structured_schemas_bind_with_langchain_mistral(schema):
     chat = ChatMistralAI(api_key="test-key", model="test-model")
     runnable = chat.with_structured_output(schema, method="json_schema")
     assert runnable is not None
+
+
+def test_run_trace_is_single_artifact_schema(tmp_path):
+    from planning_lab.models import (
+        RunTrace,
+        BenchmarkObservation,
+        save_trace,
+        load_traces,
+    )
+
+    trace = RunTrace(run_id="test-run", mode="benchmark", goal="test")
+    trace.plans.append({"id": "p1"})
+    trace.node_outputs.append({"node": "n1", "output": "ok"})
+    trace.critic_feedback.append({"critic": "c1", "accepted": True})
+    trace.episodic_memories.append({"lesson": "retry"})
+    trace.mcts_visits.append({"node": "n1", "visits": 2})
+    trace.branch_reflections.append({"branch": "b1", "reflection": "use fallback"})
+    trace.add_benchmark(BenchmarkObservation(
+        benchmark="tuesday_reshuffle",
+        case_id="tue-01",
+        method="Dynamic decomposition",
+        success=True,
+        llm_calls=7,
+        llm_calls_label="~7 (varies)",
+        tokens=8900,
+        latency_seconds=5.4,
+        estimated_cost=0.06,
+    ))
+
+    path = save_trace(trace, tmp_path)
+    assert path.parent.name == "artifacts"
+    loaded = load_traces(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].benchmark_observations[0].method == "Dynamic decomposition"
+
+
+def test_benchmark_report_is_aggregated_from_trace_observations(tmp_path):
+    from planning_lab.cli import run_evidence_benchmark, parser
+    from planning_lab.models import aggregate_benchmarks, markdown_report, save_trace
+
+    args = parser().parse_args(["--mode", "benchmark"])
+    trace = run_evidence_benchmark(args)
+    save_trace(trace, tmp_path)
+
+    reports = aggregate_benchmarks([trace])
+    rows = {row["method"]: row for row in reports["tuesday_reshuffle"]}
+    assert rows["Decomposition-first"]["success"] == "14/20"
+    assert rows["Dynamic decomposition"]["success"] == "17/20"
+
+    planning = {row["method"]: row for row in reports["planning_subtasks"]}
+    assert planning["Plan-and-Solve (ranking)"]["success"] == "11/15"
+    assert planning["Tree of Thoughts (ranking)"]["success"] == "14/15"
+    assert planning["LATS, ungrounded env. (toolkit default)"]["success"] == "9/15"
+    assert planning["LATS, grounded env. (real conflict validator)"]["success"] == "14/15"
+
+    report = markdown_report(reports)
+    assert "Decomposition-first" in report
+    assert "Dynamic decomposition" in report
+    assert "Plan-and-Solve (ranking)" in report
+    assert "Tree of Thoughts (ranking)" in report
+    assert "LATS, ungrounded env. (toolkit default)" in report
+    assert "LATS, grounded env. (real conflict validator)" in report
